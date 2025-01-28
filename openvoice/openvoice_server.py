@@ -85,6 +85,13 @@ logging.info('Loaded TTS models.')
 class UploadAudioRequest(BaseModel):
     audio_file_label: str
 
+class SpeechRequest(BaseModel):
+    model: str | None = None
+    input: str
+    voice: str | None = None
+    response_format: str | None = None
+    emotion: str | None = None
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -208,6 +215,71 @@ async def upload_audio(audio_file_label: str = Form(...), file: UploadFile = Fil
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post('/v1/audio/speech')
+async def speech(body: SpeechRequest):
+    text = body.input
+    voice = body.voice
+    accent = 'en-newest'
+    speed = 0.75
+    watermark = 'ThamWangJun'
+
+    if voice != 'lizzy':
+        voice = 'lizzy'
+
+    global model
+
+    if accent not in model:
+        logging.info(f'Loading {accent}...')
+        model[accent] = TTS(language=key_map[accent][1], device=device)
+        logging.info('...done.')
+
+    start_time = time.time()
+    try:
+        logging.info(f'Generating speech for {voice}')
+        if watermark:
+            logging.info(f'watermark: {watermark}')
+
+        # Retrieve the correct file based on the 'voice' parameter
+        # It should match the 'audio_file_label' used while uploading
+        matching_files = [file for file in os.listdir("resources") if file.startswith(voice)]
+
+        if not matching_files:
+            raise HTTPException(status_code=400, detail="No matching voice found.")
+
+        reference_speaker = f'resources/{matching_files[0]}'
+
+        target_se, audio_name = se_extractor.get_se(reference_speaker, tone_color_converter, target_dir='processed', vad=True)
+
+        # Run the base speaker tts
+        src_path = f'{output_dir}/tmp.wav'
+        save_path = f'{output_dir}/output_v2_{accent}.wav'
+        model[accent].tts_to_file(text, model[accent].hps.data.spk2id[key_map[accent][0]], src_path, speed=speed)
+
+        # Run the tone color converter
+        tone_color_converter.convert(
+            audio_src_path=src_path,
+            src_se=source_se[accent],
+            tgt_se=target_se,
+            output_path=save_path,
+            message=watermark)
+
+        result = StreamingResponse(open(save_path, 'rb'), media_type="audio/wav")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    result.headers["X-Elapsed-Time"] = str(elapsed_time)
+    result.headers["X-Device-Used"] = device
+
+    # Add CORS headers
+    result.headers["Access-Control-Allow-Origin"] = "*"  # Required for CORS support
+    result.headers["Access-Control-Allow-Credentials"] = "true"  # Required for cookies, authorization headers with HTTPS
+    result.headers["Access-Control-Allow-Headers"] = "Origin, Content-Type, X-Amz-Date, Authorization, X-Api-Key, X-Amz-Security-Token, locale"
+    result.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+
+    return result
 
 @app.get("/synthesize_speech/")
 async def synthesize_speech(
